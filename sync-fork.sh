@@ -28,12 +28,34 @@ git push origin main >> "$LOG_FILE" 2>&1
 
 # Prova a fare rebase del branch personalizzato
 if git checkout custom-can-short-disable >> "$LOG_FILE" 2>&1; then
+    # Controlla se ci sono modifiche locali
+    if ! git diff-index --quiet HEAD --; then
+        echo "$(date): Found local changes, stashing them" >> "$LOG_FILE"
+        git stash push -m "Auto-stash before sync rebase $(date)" >> "$LOG_FILE" 2>&1
+        STASHED=1
+    else
+        STASHED=0
+    fi
+    
     if git rebase main >> "$LOG_FILE" 2>&1; then
-        echo "$(date): Custom branch rebased successfully" >> "$LOG_FILE"
+        echo "$(date): ✅ Custom branch rebased successfully" >> "$LOG_FILE"
         git push origin custom-can-short-disable --force-with-lease >> "$LOG_FILE" 2>&1
+        
+        # Ripristina le modifiche locali se erano state salvate
+        if [ "$STASHED" -eq 1 ]; then
+            echo "$(date): Restoring stashed changes" >> "$LOG_FILE"
+            git stash pop >> "$LOG_FILE" 2>&1
+        fi
     else
         echo "$(date): ❌ Rebase failed - manual intervention needed" >> "$LOG_FILE"
         git rebase --abort >> "$LOG_FILE" 2>&1
+        
+        # Ripristina le modifiche locali se erano state salvate
+        if [ "$STASHED" -eq 1 ]; then
+            echo "$(date): Restoring stashed changes after failed rebase" >> "$LOG_FILE"
+            git stash pop >> "$LOG_FILE" 2>&1
+        fi
+        
         # Manda una notifica via email o telegram se configurato
         echo "SYNC CONFLICT: Manual merge required for custom-can-short-disable branch" | mail -s "NFI Sync Alert" tuo-email@example.com 2>/dev/null || true
     fi
