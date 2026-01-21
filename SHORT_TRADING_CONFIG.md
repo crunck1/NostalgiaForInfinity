@@ -16,13 +16,13 @@ La strategia controlla la variabile d'ambiente `NFI_CAN_SHORT` durante l'inizial
 
 ### Utilizzo:
 
-#### Con Docker (come configurato ora):
-Il file `.env` contiene già:
+#### Con Docker:
+Aggiungi questa linea al tuo file `.env` (creato da `live-account-example.env`):
 ```bash
 NFI_CAN_SHORT=false
 ```
 
-Basta eseguire:
+Poi esegui:
 ```bash
 docker compose up
 ```
