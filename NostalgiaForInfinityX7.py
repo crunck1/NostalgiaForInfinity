@@ -184,6 +184,9 @@ class NostalgiaForInfinityX7(IStrategy):
   futures_max_open_trades_long = 0
   futures_max_open_trades_short = 0
 
+  # Override for can_short setting (can be controlled via environment variable)
+  can_short_override = None
+
   # Based on the the first entry (regardless of rebuys)
   stop_threshold_spot = 0.10
   stop_threshold_futures = 0.10
@@ -902,6 +905,7 @@ class NostalgiaForInfinityX7(IStrategy):
       "grind_mode_max_slots",
       "grind_mode_coins",
       "max_slippage",
+      "can_short_override",
     ]
 
     if "ccxt_config" not in config["exchange"]:
@@ -986,6 +990,21 @@ class NostalgiaForInfinityX7(IStrategy):
     if ("trading_mode" in self.config) and (self.config["trading_mode"] in ["futures", "margin"]):
       self.is_futures_mode = True
       self.can_short = True
+      
+    # Check environment variable for can_short override
+    import os
+    nfi_can_short_env = os.getenv('NFI_CAN_SHORT', '').lower()
+    if nfi_can_short_env in ['false', '0', 'no', 'off']:
+      self.can_short = False
+      log.info("Short functionality disabled via NFI_CAN_SHORT environment variable.")
+    elif nfi_can_short_env in ['true', '1', 'yes', 'on']:
+      self.can_short = True
+      log.info("Short functionality enabled via NFI_CAN_SHORT environment variable.")
+      
+    # Allow override via config parameter can_short_override
+    if self.can_short_override is not None:
+      self.can_short = bool(self.can_short_override)
+      log.info(f"Short functionality set to {self.can_short} via can_short_override parameter.")
 
     # If the cached data hasn't changed, it's a no-op
     self.target_profit_cache.save()
