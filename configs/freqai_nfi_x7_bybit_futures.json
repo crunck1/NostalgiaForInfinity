@@ -1,0 +1,96 @@
+{
+  "strategy": "NostalgiaForInfinityX7_FreqAI",
+  "max_open_trades": 6,
+  "stake_currency": "USDT",
+  "stake_amount": "unlimited",
+  "tradable_balance_ratio": 0.99,
+  "fiat_display_currency": "USD",
+  "timeframe": "5m",
+  "dry_run": true,
+  "cancel_open_orders_on_exit": false,
+  "trading_mode": "futures",
+  "margin_mode": "isolated",
+  "unfilledtimeout": {
+    "entry": 10,
+    "exit": 10,
+    "exit_timeout_count": 0,
+    "unit": "minutes"
+  },
+  "entry_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1,
+    "price_last_balance": 0.0,
+    "check_depth_of_market": {
+      "enabled": false,
+      "bids_to_ask_delta": 1
+    }
+  },
+  "exit_pricing": {
+    "price_side": "same",
+    "use_order_book": true,
+    "order_book_top": 1
+  },
+  "exchange": {
+    "name": "bybit",
+    "key": "",
+    "secret": "",
+    "ccxt_config": {},
+    "ccxt_async_config": {},
+    "pair_whitelist": [],
+    "pair_blacklist": [
+      ".*(_PREMIUM|BEAR|BULL|DOWN|HALF|HEDGE|UP|[1235][SL]|-PERP|BVOL|IBVOL)/.*"
+    ]
+  },
+  "pairlists": [
+    {
+      "method": "StaticPairList"
+    }
+  ],
+  "freqai": {
+    "enabled": true,
+    "purge_old_models": 2,
+    "train_period_days": 15,
+    "backtest_period_days": 3,
+    "identifier": "NFI_X7_FreqAI_CatBoost",
+    "feature_parameters": {
+      "include_timeframes": ["15m", "1h", "4h"],
+      "include_corr_pairlist": [
+        "BTC/USDT:USDT",
+        "ETH/USDT:USDT"
+      ],
+      "label_period_candles": 24,
+      "include_shifted_candles": 2,
+      "indicator_periods_candles": [10, 20, 30],
+      "DI_threshold": 1.0,
+      "weight_factor": 0.9,
+      "principal_component_analysis": false,
+      "use_SVM_to_remove_outliers": true,
+      "svm_params": {
+        "shuffle": false,
+        "nu": 0.1
+      },
+      "use_DBSCAN_to_remove_outliers": false
+    },
+    "data_split_parameters": {
+      "test_size": 0.25,
+      "shuffle": false
+    },
+    "model_training_parameters": {
+      "n_estimators": 1000,
+      "learning_rate": 0.02,
+      "max_depth": 8,
+      "min_child_weight": 1,
+      "subsample": 0.8,
+      "colsample_bytree": 0.8,
+      "reg_alpha": 0.1,
+      "reg_lambda": 1.0
+    }
+  },
+  "bot_name": "NFI_X7_FreqAI",
+  "force_entry_enable": true,
+  "initial_state": "running",
+  "internals": {
+    "process_throttle_secs": 5
+  }
+}
