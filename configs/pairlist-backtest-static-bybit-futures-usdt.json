@@ -83,7 +83,12 @@
       "S/USDT:USDT",
       "ALGO/USDT:USDT",
       "SNX/USDT:USDT",
-      "MERL/USDT:USDT"
+      "MERL/USDT:USDT",
+      "TAIKO/USDT:USDT",
+      "IN/USDT:USDT",
+      "HANA/USDT:USDT",
+      "LYN/USDT:USDT",
+      "F/USDT:USDT"
     ]
   },
   "pairlists": [
