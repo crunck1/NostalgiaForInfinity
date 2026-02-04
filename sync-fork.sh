@@ -52,8 +52,8 @@ if git checkout custom-can-short-disable >> "$LOG_FILE" 2>&1; then
 
     if git rebase main >> "$LOG_FILE" 2>&1; then
         echo "$(date): ✅ Custom branch rebased successfully" >> "$LOG_FILE"
-        git fetch origin >> "$LOG_FILE" 2>&1  # Aggiorna riferimenti prima del push
-        git push origin custom-can-short-disable --force-with-lease >> "$LOG_FILE" 2>&1
+        git fetch myfork >> "$LOG_FILE" 2>&1  # Aggiorna riferimenti prima del push
+        git push myfork custom-can-short-disable --force-with-lease >> "$LOG_FILE" 2>&1
 
         # Ripristina le modifiche locali se erano state salvate
         if [ "$STASHED" -eq 1 ]; then
