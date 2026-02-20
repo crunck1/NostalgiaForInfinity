@@ -171,3 +171,4 @@ config*.json
 # Ignore production and backtest files
 prod*
 backtest*
+user_data/backtest_results/.gitkeep

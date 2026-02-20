@@ -27,6 +27,13 @@ if ! git remote | grep -q "upstream"; then
     echo "$(date): Added upstream remote" >> "$LOG_FILE"
 fi
 
+# Scegli il remote per il push del branch custom
+CUSTOM_REMOTE="origin"
+if git remote | grep -q "^myfork$"; then
+    CUSTOM_REMOTE="myfork"
+fi
+echo "$(date): Using remote '$CUSTOM_REMOTE' for custom branch push" >> "$LOG_FILE"
+
 # Fetch delle modifiche upstream
 git fetch upstream >> "$LOG_FILE" 2>&1
 
@@ -52,8 +59,12 @@ if git checkout custom-can-short-disable >> "$LOG_FILE" 2>&1; then
 
     if git rebase main >> "$LOG_FILE" 2>&1; then
         echo "$(date): ✅ Custom branch rebased successfully" >> "$LOG_FILE"
-        git fetch myfork >> "$LOG_FILE" 2>&1  # Aggiorna riferimenti prima del push
-        git push myfork custom-can-short-disable --force-with-lease >> "$LOG_FILE" 2>&1
+        git fetch "$CUSTOM_REMOTE" >> "$LOG_FILE" 2>&1  # Aggiorna riferimenti prima del push
+        if git push "$CUSTOM_REMOTE" custom-can-short-disable --force-with-lease >> "$LOG_FILE" 2>&1; then
+            echo "$(date): ✅ Custom branch pushed to $CUSTOM_REMOTE" >> "$LOG_FILE"
+        else
+            echo "$(date): ⚠️  Push failed on $CUSTOM_REMOTE" >> "$LOG_FILE"
+        fi
 
         # Ripristina le modifiche locali se erano state salvate
         if [ "$STASHED" -eq 1 ]; then
