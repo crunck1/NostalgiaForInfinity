@@ -1,0 +1,53 @@
+name: Sync Fork with Upstream
+
+on:
+  schedule:
+    # Ogni 2 ore (alle ore pari: 00, 02, 04, 06, 08, 10, 12, 14, 16, 18, 20, 22)
+    - cron: '0 */2 * * *'
+  workflow_dispatch: # Permette di eseguire manualmente
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout fork
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+        
+    - name: Add upstream remote
+      run: |
+        git remote add upstream https://github.com/iterativv/NostalgiaForInfinity.git
+        
+    - name: Fetch upstream changes
+      run: |
+        git fetch upstream
+        
+    - name: Sync main branch
+      run: |
+        git checkout main
+        git merge upstream/main --no-edit
+        
+    - name: Push changes to fork
+      run: |
+        git push origin main
+        
+    - name: Try to rebase custom branch
+      run: |
+        # Prova a fare rebase del branch personalizzato
+        git checkout custom-can-short-disable || exit 0
+        if git rebase main; then
+          echo "✅ Custom branch rebased successfully"
+          git push origin custom-can-short-disable --force-with-lease
+        else
+          echo "❌ Rebase failed - manual intervention needed"
+          git rebase --abort
+          # Crea un issue per notificare il conflict
+          gh issue create --title "Sync conflict on custom-can-short-disable" \
+            --body "The automatic sync failed to rebase custom-can-short-disable branch. Manual merge required." \
+            --label "sync-conflict" || true
+        fi
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

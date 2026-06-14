@@ -154,6 +154,8 @@ user_data/logs/*
 user_data/notebooks
 user_data/plot
 user_data/freqaimodels
+user_data/models/
+user_data/
 artifacts/
 
 # Don't commit configs
@@ -165,3 +167,9 @@ config*.json
 *.sqlite-shm
 *.sqlite-wal
 .env**
+
+# Ignore production and backtest files
+prod*
+backtest*
+user_data/backtest_results/.gitkeep
+sync-fork.sh

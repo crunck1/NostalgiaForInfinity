@@ -4,6 +4,7 @@ import pathlib
 import rapidjson
 import numpy as np
 import talib.abstract as ta
+import pandas_ta as pta
 import pandas as pd
 from freqtrade.strategy.interface import IStrategy
 from freqtrade.strategy import merge_informative_pair
@@ -70,7 +71,7 @@ class NostalgiaForInfinityX7(IStrategy):
   INTERFACE_VERSION = 3
 
   def version(self) -> str:
-    return "v17.4.319"
+    return "v17.4.9"
 
   stoploss = -0.99
 
@@ -252,6 +253,9 @@ class NostalgiaForInfinityX7(IStrategy):
   # Limit the number of long/short trades for futures (0 for no limit)
   futures_max_open_trades_long = 0
   futures_max_open_trades_short = 0
+
+  # Override for can_short setting (can be controlled via environment variable)
+  can_short_override = None
 
   # Based on the the first entry (regardless of rebuys)
   stop_threshold_spot = 0.10
@@ -897,6 +901,15 @@ class NostalgiaForInfinityX7(IStrategy):
     "long_entry_condition_161_enable": True,
     "long_entry_condition_162_enable": True,
     "long_entry_condition_163_enable": True,
+    "long_entry_condition_164_enable": False,
+    "long_entry_condition_165_enable": False,
+    "long_entry_condition_166_enable": False,
+    "long_entry_condition_167_enable": False,
+    "long_entry_condition_168_enable": False,
+    "long_entry_condition_169_enable": False,
+    "long_entry_condition_170_enable": False,  # incompatible with doom stoploss: single entry no DCA
+    "long_entry_condition_171_enable": False,  # incompatible with doom stoploss: single entry no DCA
+    "long_entry_condition_172_enable": False,  # inconsistent across periods: doom stoploss single entry
   }
 
   short_entry_signal_params = {
@@ -915,6 +928,12 @@ class NostalgiaForInfinityX7(IStrategy):
     # "short_entry_condition_641_enable": True,
     # "short_entry_condition_642_enable": True,
     # "short_entry_condition_661_enable": True,
+    "short_entry_condition_662_enable": False,  # doom stoploss -70% incompatible with short on dead cat bounce
+    "short_entry_condition_663_enable": False,  # doom stoploss -70% incompatible with short on OBV divergence
+    "short_entry_condition_664_enable": False,  # too many catastrophic losses on meme coins
+    "short_entry_condition_665_enable": True,
+    "short_entry_condition_666_enable": False,  # 50% WR, net negative (-24% avg loss)
+    "short_entry_condition_667_enable": True,
   }
 
   #############################################################
@@ -977,6 +996,7 @@ class NostalgiaForInfinityX7(IStrategy):
       "grind_mode_max_slots",
       "grind_mode_coins",
       "max_slippage",
+      "can_short_override",
     ]
 
     exchange_config = config["exchange"]
@@ -1069,6 +1089,21 @@ class NostalgiaForInfinityX7(IStrategy):
     if ("trading_mode" in strategy_config) and (strategy_config["trading_mode"] in ["futures", "margin"]):
       self.is_futures_mode = True
       self.can_short = True
+
+    # Check environment variable for can_short override
+    import os
+    nfi_can_short_env = os.getenv('NFI_CAN_SHORT', '').lower()
+    if nfi_can_short_env in ['false', '0', 'no', 'off']:
+      self.can_short = False
+      log.info("Short functionality disabled via NFI_CAN_SHORT environment variable.")
+    elif nfi_can_short_env in ['true', '1', 'yes', 'on']:
+      self.can_short = True
+      log.info("Short functionality enabled via NFI_CAN_SHORT environment variable.")
+
+    # Allow override via config parameter can_short_override
+    if self.can_short_override is not None:
+      self.can_short = bool(self.can_short_override)
+      log.info(f"Short functionality set to {self.can_short} via can_short_override parameter.")
 
     # If the cached data hasn't changed, it's a no-op
     self.target_profit_cache.save()
@@ -3198,6 +3233,21 @@ class NostalgiaForInfinityX7(IStrategy):
     return mfv_sum / vol_sum
 
   @staticmethod
+  def stoch_k(high, low, close):
+    stoch_k = ta.STOCHF(high, low, close, fastk_period=14, fastd_period=3, fastd_matype=0)[1]
+    stoch_k[:17] = np.nan
+    return stoch_k
+
+  @staticmethod
+  def stochrsi_k(rsi_14: np.ndarray) -> np.ndarray:
+    rsi_min = ta.MIN(rsi_14, timeperiod=14)
+    rsi_max = ta.MAX(rsi_14, timeperiod=14)
+    denom = rsi_max - rsi_min
+    denom = np.where(denom == 0, np.nan, denom)
+    stochrsi = ((rsi_14 - rsi_min) / denom) * 100.0
+    return ta.SMA(stochrsi, timeperiod=3)
+
+  @staticmethod
   def fast_pct_change(arr: np.ndarray) -> np.ndarray:
     """
     Compute the percentage change between consecutive values.
@@ -3214,23 +3264,10 @@ class NostalgiaForInfinityX7(IStrategy):
     return out
 
   @staticmethod
-  def stochrsi_k(rsi_14: np.ndarray) -> np.ndarray:
-    """
-    Calculate the %K line of the Stochastic RSI.
-
-    Stochastic RSI normalizes RSI values relative to their recent
-    14-period range, then applies a 3-period SMA smoothing.
-
-    Periods where the RSI range is zero are marked as NaN to prevent
-    invalid values from producing misleading momentum signals.
-    """
-    rsi_min = ta.MIN(rsi_14, timeperiod=14)
-    rsi_max = ta.MAX(rsi_14, timeperiod=14)
-    denom = rsi_max - rsi_min
-    denom = np.where(denom == 0, np.nan, denom)
-    stochrsi = ((rsi_14 - rsi_min) / denom) * 100.0
-
-    return ta.SMA(stochrsi, timeperiod=3)
+  def safe_series(series, idx: pd.Index) -> pd.Series:
+    if isinstance(series, pd.Series):
+      return series
+    return pd.Series(np.nan, index=idx, dtype=np.float64)
 
   @staticmethod
   def calc_kst(close: np.ndarray, ta_roc, ta_sma) -> tuple[np.ndarray, np.ndarray]:
@@ -3324,143 +3361,84 @@ class NostalgiaForInfinityX7(IStrategy):
     # =========================================================================
     # BASE DATA
     # =========================================================================
-    close_np = informative_1d["close"].to_numpy(copy=False)
-    high_np = informative_1d["high"].to_numpy(copy=False)
-    low_np = informative_1d["low"].to_numpy(copy=False)
-    open_np = informative_1d["open"].to_numpy(copy=False)
-    volume_np = informative_1d["volume"].to_numpy(copy=False)
 
-    # =========================================================================
-    # CORE INDICATORS
-    # =========================================================================
-    rsi_3 = ta_rsi(close_np, timeperiod=3)
-    rsi_14 = ta_rsi(close_np, timeperiod=14)
-    aroon_down, aroon_up = ta_aroon(high_np, low_np, timeperiod=14)
-
-    # =========================================================================
-    # STOCH
-    # =========================================================================
-    stoch_k = ta.STOCH(
-      high_np, low_np, close_np, fastk_period=14, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0
-    )[0]
-    stochrsi_k = stochrsi_k_func(rsi_14)
-
-    # =========================================================================
-    # MONEY FLOW
-    # =========================================================================
-    mfi_14 = ta.MFI(high_np, low_np, close_np, volume_np, timeperiod=14)
-    cmf_20 = chaikin_money_flow(high_np, low_np, close_np, volume_np, timeperiod=20)
-
-    # =========================================================================
-    # MOMENTUM
-    # =========================================================================
-    willr_14 = ta.WILLR(high_np, low_np, close_np, timeperiod=14)
-    roc_2 = ta_roc(close_np, timeperiod=2)
-    roc_9 = ta_roc(close_np, timeperiod=9)
-
-    # =========================================================================
-    # RSI CHANGE %
-    # =========================================================================
-    rsi3_change = fast_pct_change(rsi_3)
-
-    # =========================================================================
-    # CANDLE %
-    # =========================================================================
-    open_safe = np.where(open_np == 0, np.nan, open_np)
-    change_pct = ((close_np - open_np) / open_safe) * 100.0
-
-    # =========================================================================
-    # WICK %
-    # =========================================================================
-    max_oc = np.maximum(open_np, close_np)
-    min_oc = np.minimum(open_np, close_np)
-    max_oc_calc = np.where(max_oc == 0, np.nan, max_oc)
-    min_oc_calc = np.where(min_oc == 0, np.nan, min_oc)
-    top_wick_pct = ((high_np - max_oc) / max_oc_calc) * 100.0
-    bot_wick_pct = np.abs(((low_np - min_oc) / min_oc_calc) * 100.0)
-
-    # =========================================================================
-    # HIGH / LOW ROLLING
-    # =========================================================================
-    high_max_6 = ta_max(high_np, timeperiod=6)
-    high_max_12 = ta_max(high_np, timeperiod=12)
-    high_max_20 = ta_max(high_np, timeperiod=20)
-    high_max_30 = ta_max(high_np, timeperiod=30)
-    low_min_6 = ta_min(low_np, timeperiod=6)
-    low_min_12 = ta_min(low_np, timeperiod=12)
-    low_min_20 = ta_min(low_np, timeperiod=20)
-    low_min_30 = ta_min(low_np, timeperiod=30)
-
-    # =========================================================================
-    # ASSIGN DATAFRAME
-    # =========================================================================
-    new_cols = pd.DataFrame(
-      {
-        "RSI_3": rsi_3,
-        "RSI_14": rsi_14,
-        "STOCHk_14_3_3": stoch_k,
-        "STOCHRSIk_14_14_3_3": stochrsi_k,
-        "MFI_14": mfi_14,
-        "CMF_20": cmf_20,
-        "WILLR_14": willr_14,
-        "AROONU_14": aroon_up,
-        "AROOND_14": aroon_down,
-        "ROC_2": roc_2,
-        "ROC_9": roc_9,
-        "RSI_3_change_pct": rsi3_change,
-        "change_pct": change_pct,
-        "top_wick_pct": top_wick_pct,
-        "bot_wick_pct": bot_wick_pct,
-        "high_max_6": high_max_6,
-        "high_max_12": high_max_12,
-        "high_max_20": high_max_20,
-        "high_max_30": high_max_30,
-        "low_min_6": low_min_6,
-        "low_min_12": low_min_12,
-        "low_min_20": low_min_20,
-        "low_min_30": low_min_30,
-      },
-      index=informative_1d.index,
+    # RSI
+    _rsi_3_1d = pta.rsi(informative_1d["close"], length=3)
+    informative_1d["RSI_3"] = _rsi_3_1d if _rsi_3_1d is not None else np.nan
+    _rsi_14_1d = pta.rsi(informative_1d["close"], length=14)
+    informative_1d["RSI_14"] = _rsi_14_1d if _rsi_14_1d is not None else np.nan
+    informative_1d["RSI_3_change_pct"] = informative_1d["RSI_3"].pct_change() * 100.0
+    informative_1d["RSI_14_change_pct"] = informative_1d["RSI_14"].pct_change() * 100.0
+    informative_1d["RSI_3_diff"] = informative_1d["RSI_3"].diff()
+    informative_1d["RSI_14_diff"] = informative_1d["RSI_14"].diff()
+    # BB 20 - STD2
+    bbands_20_2 = pta.bbands(informative_1d["close"], length=20)
+    informative_1d["BBL_20_2.0"] = bbands_20_2["BBL_20_2.0"] if isinstance(bbands_20_2, pd.DataFrame) else np.nan
+    informative_1d["BBM_20_2.0"] = bbands_20_2["BBM_20_2.0"] if isinstance(bbands_20_2, pd.DataFrame) else np.nan
+    informative_1d["BBU_20_2.0"] = bbands_20_2["BBU_20_2.0"] if isinstance(bbands_20_2, pd.DataFrame) else np.nan
+    informative_1d["BBB_20_2.0"] = bbands_20_2["BBB_20_2.0"] if isinstance(bbands_20_2, pd.DataFrame) else np.nan
+    informative_1d["BBP_20_2.0"] = bbands_20_2["BBP_20_2.0"] if isinstance(bbands_20_2, pd.DataFrame) else np.nan
+    # MFI
+    informative_1d["MFI_14"] = pta.mfi(
+      informative_1d["high"], informative_1d["low"], informative_1d["close"], informative_1d["volume"], length=14
     )
-    informative_1d = pd.concat([informative_1d, new_cols], axis=1, copy=False)
+    # CMF
+    informative_1d["CMF_20"] = pta.cmf(
+      informative_1d["high"], informative_1d["low"], informative_1d["close"], informative_1d["volume"], length=20
+    )
+    # Williams %R
+    informative_1d["WILLR_14"] = pta.willr(
+      informative_1d["high"], informative_1d["low"], informative_1d["close"], length=14
+    )
+    # AROON
+    aroon_14 = pta.aroon(informative_1d["high"], informative_1d["low"], length=14)
+    informative_1d["AROONU_14"] = aroon_14["AROONU_14"] if isinstance(aroon_14, pd.DataFrame) else np.nan
+    informative_1d["AROOND_14"] = aroon_14["AROOND_14"] if isinstance(aroon_14, pd.DataFrame) else np.nan
+    # Stochastic
+    try:
+      stochrsi = pta.stoch(informative_1d["high"], informative_1d["low"], informative_1d["close"])
+      informative_1d["STOCHk_14_3_3"] = stochrsi["STOCHk_14_3_3"] if isinstance(stochrsi, pd.DataFrame) else np.nan
+      informative_1d["STOCHd_14_3_3"] = stochrsi["STOCHd_14_3_3"] if isinstance(stochrsi, pd.DataFrame) else np.nan
+    except AttributeError:
+      informative_1d["STOCHk_14_3_3"] = np.nan
+      informative_1d["STOCHd_14_3_3"] = np.nan
+    # Stochastic RSI
+    stochrsi = pta.stochrsi(informative_1d["close"])
+    informative_1d["STOCHRSIk_14_14_3_3"] = (
+      stochrsi["STOCHRSIk_14_14_3_3"] if isinstance(stochrsi, pd.DataFrame) else np.nan
+    )
+    informative_1d["STOCHRSId_14_14_3_3"] = (
+      stochrsi["STOCHRSId_14_14_3_3"] if isinstance(stochrsi, pd.DataFrame) else np.nan
+    )
+    # ROC
+    informative_1d["ROC_2"] = pta.roc(informative_1d["close"], length=2)
+    informative_1d["ROC_9"] = pta.roc(informative_1d["close"], length=9)
+    # Candle change
+    informative_1d["change_pct"] = (informative_1d["close"] - informative_1d["open"]) / informative_1d["open"] * 100.0
+    # Wicks
+    informative_1d["top_wick_pct"] = (
+      (informative_1d["high"] - np.maximum(informative_1d["open"], informative_1d["close"]))
+      / np.maximum(informative_1d["open"], informative_1d["close"])
+      * 100.0
+    )
+    informative_1d["bot_wick_pct"] = abs(
+      (informative_1d["low"] - np.minimum(informative_1d["open"], informative_1d["close"]))
+      / np.minimum(informative_1d["open"], informative_1d["close"])
+      * 100.0
+    )
+    # Max highs
+    informative_1d["high_max_6"] = informative_1d["high"].rolling(6).max()
+    informative_1d["high_max_12"] = informative_1d["high"].rolling(12).max()
+    informative_1d["high_max_20"] = informative_1d["high"].rolling(20).max()
+    informative_1d["high_max_30"] = informative_1d["high"].rolling(30).max()
+    # Max lows
+    informative_1d["low_min_6"] = informative_1d["low"].rolling(6).min()
+    informative_1d["low_min_12"] = informative_1d["low"].rolling(12).min()
+    informative_1d["low_min_20"] = informative_1d["low"].rolling(20).min()
+    informative_1d["low_min_30"] = informative_1d["low"].rolling(30).min()
 
-    # Enable ONLY during debugging
-    debug = False
-    if debug:
-      debug_cols = [
-        "RSI_3",
-        "RSI_14",
-        "STOCHk_14_3_3",
-        "STOCHRSIk_14_14_3_3",
-        "MFI_14",
-        "CMF_20",
-        "WILLR_14",
-        "AROONU_14",
-        "AROOND_14",
-        "ROC_2",
-        "ROC_9",
-        "RSI_3_change_pct",
-        "change_pct",
-        "top_wick_pct",
-        "bot_wick_pct",
-        "high_max_6",
-        "high_max_12",
-        "high_max_20",
-        "high_max_30",
-        "low_min_6",
-        "low_min_12",
-        "low_min_20",
-        "low_min_30",
-      ]
-
-      validate_indicators(df=informative_1d, columns=debug_cols, pair=metadata_pair, timeframe=info_timeframe)
-
-    # =========================================================================
-    # LOGGING
-    # =========================================================================
-    if debug_time:
-      tok = time.perf_counter()
-      log.debug("[%s] informative_1d_indicators took: %.4f seconds.", metadata_pair, tok - tik)
+    tok = time.perf_counter()
+    log.debug("[%s] informative_1d_indicators took: %.4f seconds.", metadata_pair, tok - tik)
 
     return informative_1d
 
@@ -3503,6 +3481,13 @@ class NostalgiaForInfinityX7(IStrategy):
     open_np = informative_4h["open"].to_numpy(copy=False)
     volume_np = informative_4h["volume"].to_numpy(copy=False)
 
+    idx = informative_4h.index
+    high = informative_4h["high"]
+    low = informative_4h["low"]
+    close = informative_4h["close"]
+    volume = informative_4h["volume"]
+    open_ = informative_4h["open"]
+
     # =========================================================================
     # CORE INDICATORS
     # =========================================================================
@@ -3512,6 +3497,56 @@ class NostalgiaForInfinityX7(IStrategy):
 
     # =========================================================================
     # STOCH
+    try:
+      stoch = pta.stoch(high, low, close)
+      stoch_k = self.safe_series(stoch["STOCHk_14_3_3"] if isinstance(stoch, pd.DataFrame) else None, idx)
+    except Exception:
+      stoch_k = pd.Series(np.nan, index=idx, dtype=np.float64)
+
+    # STOCH RSI
+    stochrsi = pta.stochrsi(close)
+
+    stochrsi_k = self.safe_series(stochrsi["STOCHRSIk_14_14_3_3"] if isinstance(stochrsi, pd.DataFrame) else None, idx)
+
+    # KST
+    kst = pta.kst(close)
+
+    kst_main = self.safe_series(kst["KST_10_15_20_30_10_10_10_15"] if isinstance(kst, pd.DataFrame) else None, idx)
+    kst_signal = self.safe_series(kst["KSTs_9"] if isinstance(kst, pd.DataFrame) else None, idx)
+
+    # MFI
+    mfi_14 = self.safe_series(pta.mfi(high, low, close, volume, length=14), idx)
+
+    # CMF
+    cmf_20 = self.safe_series(pta.cmf(high, low, close, volume, length=20), idx)
+
+    # Williams %R
+    willr_14 = self.safe_series(pta.willr(high, low, close, length=14), idx)
+
+    # UO
+    uo = self.safe_series(pta.uo(high, low, close), idx)
+
+    # OBV
+    obv = self.safe_series(pta.obv(close, volume), idx)
+
+    # ROC
+    roc_2 = self.safe_series(pta.roc(close, length=2), idx)
+    roc_9 = self.safe_series(pta.roc(close, length=9), idx)
+
+    # Donchian upper band: highest high of last 120 candles = 20-day high (6 candles/day × 20 days)
+    informative_4h["high_max_120"] = informative_4h["high"].rolling(120).max()
+
+    # Candle %
+    open_safe = open_.replace(0, np.nan)
+    change_pct = ((close - open_safe) / open_safe) * 100.0
+
+    # Wick %
+    max_oc = np.maximum(open_, close).replace(0, np.nan)
+    min_oc = np.minimum(open_, close).replace(0, np.nan)
+
+    top_wick_pct = ((high - max_oc) / max_oc) * 100.0
+    bot_wick_pct = np.abs((low - min_oc) / min_oc) * 100.0
+
     # =========================================================================
     stoch_k = ta.STOCH(
       high_np, low_np, close_np, fastk_period=14, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0
@@ -3703,6 +3738,13 @@ class NostalgiaForInfinityX7(IStrategy):
     open_np = informative_1h["open"].to_numpy(copy=False)
     volume_np = informative_1h["volume"].to_numpy(copy=False)
 
+    idx = informative_1h.index
+    high = informative_1h["high"]
+    low = informative_1h["low"]
+    close = informative_1h["close"]
+    volume = informative_1h["volume"]
+    open_ = informative_1h["open"]
+
     # =========================================================================
     # CORE INDICATORS
     # =========================================================================
@@ -3714,6 +3756,66 @@ class NostalgiaForInfinityX7(IStrategy):
 
     # =========================================================================
     # STOCH
+    try:
+      stoch = pta.stoch(high, low, close)
+      stoch_k = self.safe_series(stoch["STOCHk_14_3_3"] if isinstance(stoch, pd.DataFrame) else None, idx)
+    except Exception:
+      stoch_k = pd.Series(np.nan, index=idx, dtype=np.float64)
+
+    # STOCH RSI
+    stochrsi = pta.stochrsi(close)
+
+    stochrsi_k = self.safe_series(stochrsi["STOCHRSIk_14_14_3_3"] if isinstance(stochrsi, pd.DataFrame) else None, idx)
+
+    # KST
+    kst = pta.kst(close)
+
+    kst_main = self.safe_series(kst["KST_10_15_20_30_10_10_10_15"] if isinstance(kst, pd.DataFrame) else None, idx)
+    kst_signal = self.safe_series(kst["KSTs_9"] if isinstance(kst, pd.DataFrame) else None, idx)
+
+    # MFI
+    mfi_14 = self.safe_series(pta.mfi(high, low, close, volume, length=14), idx)
+
+    # CMF
+    cmf_20 = self.safe_series(pta.cmf(high, low, close, volume, length=20), idx)
+
+    # Williams %R
+    willr_14 = self.safe_series(pta.willr(high, low, close, length=14), idx)
+    willr_84 = self.safe_series(pta.willr(high, low, close, length=84), idx)
+
+    # UO
+    uo = self.safe_series(pta.uo(high, low, close), idx)
+
+    # OBV
+    informative_1h["OBV"] = pta.obv(informative_1h["close"], informative_1h["volume"])
+    informative_1h["OBV_change_pct"] = informative_1h["OBV"].pct_change() * 100.0
+    # Volume mean (USDT notional) — used to filter illiquid coins prone to violent pumps
+    informative_1h["volume_mean_12"] = informative_1h["volume"].rolling(12).mean()
+    informative_1h["volume_mean_24"] = informative_1h["volume"].rolling(24).mean()
+    # Volume ratio: current candle vs 24h baseline — Bolz 2024, Karbalaii 2025 (>4x = surge)
+    informative_1h["volume_ratio_24"] = informative_1h["volume"] / informative_1h["volume_mean_24"].replace(0, np.nan)
+    # BB bandwidth rolling mean — squeeze detection (Karbalaii 2025: range compression pre-pump)
+    informative_1h["BBB_20_2.0_mean_20"] = pd.Series(
+      ((bb_upper - bb_lower) / bb_middle_safe) * 100.0, index=informative_1h.index
+    ).rolling(20).mean()
+    # ROC
+    roc_2 = self.safe_series(pta.roc(close, length=2), idx)
+    roc_9 = self.safe_series(pta.roc(close, length=9), idx)
+
+    # CCI
+    cci_20 = self.safe_series(pta.cci(high, low, close, length=20), idx)
+
+    # Wick %
+    max_oc = np.maximum(open_, close).replace(0, np.nan)
+    min_oc = np.minimum(open_, close).replace(0, np.nan)
+
+    top_wick_pct = ((high - max_oc) / max_oc) * 100.0
+    bot_wick_pct = np.abs((low - min_oc) / min_oc) * 100.0
+
+    # Candle %
+    open_safe = open_.replace(0, np.nan)
+    change_pct = ((close - open_safe) / open_safe) * 100.0
+
     # =========================================================================
     stoch_k = ta.STOCH(
       high_np, low_np, close_np, fastk_period=14, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0
@@ -4030,9 +4132,153 @@ class NostalgiaForInfinityX7(IStrategy):
     ta_max = ta.MAX
     ta_min = ta.MIN
 
-    # =========================================================================
-    # BASE DATA
-    # =========================================================================
+    # Indicators
+    # base_tf_5m_indicators_pandas_ta = pta.Strategy(
+    #   name="base_tf_5m_indicators_pandas_ta",
+    #   ta=[
+    #     # RSI
+    #     {"kind": "rsi", "length": 3},
+    #     {"kind": "rsi", "length": 4},
+    #     {"kind": "rsi", "length": 14},
+    #     {"kind": "rsi", "length": 20},
+    #     # EMA
+    #     {"kind": "ema", "length": 3},
+    #     {"kind": "ema", "length": 9},
+    #     {"kind": "ema", "length": 12},
+    #     {"kind": "ema", "length": 16},
+    #     {"kind": "ema", "length": 20},
+    #     {"kind": "ema", "length": 26},
+    #     {"kind": "ema", "length": 50},
+    #     {"kind": "ema", "length": 100},
+    #     {"kind": "ema", "length": 200},
+    #     # SMA
+    #     {"kind": "sma", "length": 16},
+    #     {"kind": "sma", "length": 30},
+    #     {"kind": "sma", "length": 75},
+    #     {"kind": "sma", "length": 200},
+    #     # BB 20 - STD2
+    #     {"kind": "bbands", "length": 20},
+    #     # BB 40 - STD2
+    #     {"kind": "bbands", "length": 40},
+    #     # Williams %R
+    #     {"kind": "willr", "length": 14},
+    #     {"kind": "willr", "length": 480},
+    #     # CTI
+    #     {"kind": "cti", "length": 20},
+    #     # MFI
+    #     {"kind": "mfi"},
+    #     # CMF
+    #     {"kind": "cmf"},
+    #     # CCI
+    #     {"kind": "cci", "length": 20},
+    #     # Hull Moving Average
+    #     {"kind": "hma", "length": 55},
+    #     {"kind": "hma", "length": 70},
+    #     # ZL MA
+    #     # {"kind": "zlma", "length": 50, "mamode":"linreg"},
+    #     # Heiken Ashi
+    #     # {"kind": "ha"},
+    #     # STOCHRSI
+    #     {"kind": "stochrsi"},
+    #     # KST
+    #     {"kind": "kst"},
+    #     # ROC
+    #     {"kind": "roc"},
+    #     # AROON
+    #     {"kind": "aroon"},
+    #     # UO
+    #     {"kind": "uo"},
+    #     # AO
+    #     {"kind": "ao"},
+    #     # OBV
+    #     {"kind": "obv"},
+    #   ],
+    # )
+    # df.ta.study(base_tf_5m_indicators_pandas_ta, cores=self.num_cores_indicators_calc)
+    # RSI
+    df["RSI_3"] = pta.rsi(df["close"], length=3)
+    df["RSI_4"] = pta.rsi(df["close"], length=4)
+    df["RSI_14"] = pta.rsi(df["close"], length=14)
+    df["RSI_20"] = pta.rsi(df["close"], length=20)
+    # df["RSI_3_change_pct"] = df["RSI_3"].pct_change() * 100.0
+    # df["RSI_14_change_pct"] = df["RSI_14"].pct_change() * 100.0
+    # EMA
+    df["EMA_3"] = pta.ema(df["close"], length=3)
+    df["EMA_9"] = pta.ema(df["close"], length=9)
+    df["EMA_12"] = pta.ema(df["close"], length=12)
+    df["EMA_16"] = pta.ema(df["close"], length=16)
+    df["EMA_20"] = pta.ema(df["close"], length=20)
+    df["EMA_26"] = pta.ema(df["close"], length=26)
+    df["EMA_50"] = pta.ema(df["close"], length=50)
+    df["EMA_100"] = pta.ema(df["close"], length=100, fillna=0.0)
+    df["EMA_200"] = pta.ema(df["close"], length=200, fillna=0.0)
+    # SMA
+    _sma_9 = pta.sma(df["close"], length=9)
+    df["SMA_9"] = _sma_9 if _sma_9 is not None else np.nan
+    _sma_16 = pta.sma(df["close"], length=16)
+    df["SMA_16"] = _sma_16 if _sma_16 is not None else np.nan
+    _sma_21 = pta.sma(df["close"], length=21)
+    df["SMA_21"] = _sma_21 if _sma_21 is not None else np.nan
+    _sma_30 = pta.sma(df["close"], length=30)
+    df["SMA_30"] = _sma_30 if _sma_30 is not None else np.nan
+    _sma_200 = pta.sma(df["close"], length=200)
+    df["SMA_200"] = _sma_200 if _sma_200 is not None else np.nan
+    # BB 20 - STD2
+    bbands_20_2 = pta.bbands(df["close"], length=20)
+    df["BBL_20_2.0"] = bbands_20_2["BBL_20_2.0"] if isinstance(bbands_20_2, pd.DataFrame) else np.nan
+    # df["BBM_20_2.0"] = bbands_20_2["BBM_20_2.0"] if isinstance(bbands_20_2, pd.DataFrame) else np.nan
+    df["BBU_20_2.0"] = bbands_20_2["BBU_20_2.0"] if isinstance(bbands_20_2, pd.DataFrame) else np.nan
+    df["BBB_20_2.0"] = bbands_20_2["BBB_20_2.0"] if isinstance(bbands_20_2, pd.DataFrame) else np.nan
+    # df["BBP_20_2.0"] = bbands_20_2["BBP_20_2.0"] if isinstance(bbands_20_2, pd.DataFrame) else np.nan
+    # BB 40 - STD2
+    upper, middle, lower = ta.BBANDS(df["close"], timeperiod=40, nbdevup=2.0, nbdevdn=2.0, matype=0)
+    df["BBL_40_2.0"] = lower
+    df["BBM_40_2.0"] = middle
+    df["BBU_40_2.0"] = upper
+    df["BBB_40_2.0"] = (upper - lower) / middle * 100.0  # Bandwidth
+    df["BBP_40_2.0"] = (df["close"] - lower) / (upper - lower)  # %B
+    df["BBD_40_2.0"] = (df["BBM_40_2.0"] - df["BBL_40_2.0"]).abs()  # delta
+    df["BBT_40_2.0"] = (df["close"] - df["BBL_40_2.0"]).abs()  # tail
+    # MFI
+    df["MFI_14"] = pta.mfi(df["high"], df["low"], df["close"], df["volume"], length=14)
+    # CMF
+    df["CMF_20"] = pta.cmf(df["high"], df["low"], df["close"], df["volume"], length=20)
+    # Williams %R
+    df["WILLR_14"] = pta.willr(df["high"], df["low"], df["close"], length=14)
+    df["WILLR_480"] = pta.willr(df["high"], df["low"], df["close"], length=480)
+    # AROON
+    aroon_14 = pta.aroon(df["high"], df["low"], length=14)
+    df["AROONU_14"] = aroon_14["AROONU_14"] if isinstance(aroon_14, pd.DataFrame) else np.nan
+    df["AROOND_14"] = aroon_14["AROOND_14"] if isinstance(aroon_14, pd.DataFrame) else np.nan
+    # Stochastic RSI
+    stochrsi = pta.stochrsi(df["close"])
+    df["STOCHRSIk_14_14_3_3"] = stochrsi["STOCHRSIk_14_14_3_3"] if isinstance(stochrsi, pd.DataFrame) else np.nan
+    # df["STOCHRSId_14_14_3_3"] = stochrsi["STOCHRSId_14_14_3_3"] if isinstance(stochrsi, pd.DataFrame) else np.nan
+    # KST
+    kst = pta.kst(df["close"])
+    df["KST_10_15_20_30_10_10_10_15"] = kst["KST_10_15_20_30_10_10_10_15"] if isinstance(kst, pd.DataFrame) else np.nan
+    df["KSTs_9"] = kst["KSTs_9"] if isinstance(kst, pd.DataFrame) else np.nan
+    # OBV
+    df["OBV"] = pta.obv(df["close"], df["volume"])
+    df["OBV_change_pct"] = df["OBV"].pct_change() * 100.0
+    # ROC
+    df["ROC_2"] = pta.roc(df["close"], length=2)
+    df["ROC_9"] = pta.roc(df["close"], length=9)
+    # Candle change
+    df["change_pct"] = (df["close"] - df["open"]) / df["open"] * 100.0
+    # Close delta
+    df["close_delta"] = (df["close"] - df["close"].shift()).abs()
+    # Close max
+    df["close_max_6"] = df["close"].rolling(6).max()
+    df["close_max_12"] = df["close"].rolling(12).max()
+    df["close_max_48"] = df["close"].rolling(48).max()
+    # Close min
+    df["close_min_6"] = df["close"].rolling(6).min()
+    df["close_min_12"] = df["close"].rolling(12).min()
+    df["close_min_48"] = df["close"].rolling(48).min()
+    # Number of empty candles
+    df["num_empty_288"] = (df["volume"] <= 0).rolling(window=288, min_periods=288).sum()
+
     close_np = df["close"].to_numpy(copy=False)
     high_np = df["high"].to_numpy(copy=False)
     low_np = df["low"].to_numpy(copy=False)
@@ -4168,6 +4414,7 @@ class NostalgiaForInfinityX7(IStrategy):
     )
 
     df = pd.concat([df, new_cols], axis=1, copy=False)
+    df = df.loc[:, ~df.columns.duplicated(keep="last")]
 
     # Enable ONLY during debugging
     debug = False
@@ -12023,6 +12270,11 @@ class NostalgiaForInfinityX7(IStrategy):
         | roc_9_1h_lt_20
         | roc_9_4h_lt_60
       )
+      # minimum liquidity: avg 1h USDT volume > 500k (excludes illiquid meme coins prone to violent pumps)
+      & ((df["volume_mean_12_1h"] * df["close"]) > 500000.0)
+      # macro trend filter: avoid shorting during daily uptrend or strong recent momentum
+      & (df["RSI_14_1d"] < 50.0)
+      & (df["ROC_9_1d"] < 10.0)
     )
 
     df["global_protections_short_pump"] = (
@@ -19336,7 +19588,6 @@ class NostalgiaForInfinityX7(IStrategy):
             # big drop in the last 30 days, 4h down move, 4h still high
             & ((close > (high_max_30_1d * 0.25)) | (rsi_3_4h_gt_45) | (rsi_14_4h_lt_40))
           )
-
           # Logic
           long_entry_logic.append(
             (rsi_3_lt_50) & (aroonu_14_15m_lt_25) & (stochrsi_k_15m_lt_20) & (close_15m < (ema_20_15m * 0.924))
@@ -19614,7 +19865,6 @@ class NostalgiaForInfinityX7(IStrategy):
             # big drop in the last 30 days, 4h still not low enough
             & ((close > (high_max_30_1d * 0.25)) | (stochrsi_k_4h_lt_30))
           )
-
           # Logic
           long_entry_logic.append(
             (rsi_3_lt_40)
@@ -24776,6 +25026,248 @@ class NostalgiaForInfinityX7(IStrategy):
             & (close < sma_9)
           )
 
+        # Condition #164 - Early trend onset: 4h KST bullish crossover (Long).
+        if long_entry_condition_index == 164:
+          # Protections
+          long_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          long_entry_logic.append(df["protections_long_global"] == True)
+          # 4h not already extended, 1d not overbought
+          long_entry_logic.append((df["ROC_9_4h"] < 30.0) | (df["ROC_9_1d"] < 60.0))
+          # not in macro bear on 1h
+          long_entry_logic.append(df["RSI_14_1h"] > 30.0)
+          # 4h not overbought
+          long_entry_logic.append(df["RSI_14_4h"] < 75.0)
+
+          # Logic
+          # 4h KST above signal line = multi-TF momentum onset (Fieberg et al., JFQA 2025 - CTREND)
+          long_entry_logic.append(df["KST_10_15_20_30_10_10_10_15_4h"] > df["KSTs_9_4h"])
+          # 4h volume confirms accumulation
+          long_entry_logic.append(df["CMF_20_4h"] > 0.0)
+          # 4h RSI recovering but not overbought
+          long_entry_logic.append(df["RSI_14_4h"] > 45.0)
+          # price above 4h short-term MA: trend onset confirmed
+          long_entry_logic.append(df["close"] > df["EMA_12_4h"])
+          # 5m entry not chasing
+          long_entry_logic.append(df["RSI_3"] < 60.0)
+
+        # Condition #165 - OBV accumulation + 4h RSI momentum building (Long).
+        if long_entry_condition_index == 165:
+          # Protections
+          long_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          long_entry_logic.append(df["protections_long_global"] == True)
+          # 1h not overbought
+          long_entry_logic.append(df["RSI_14_1h"] < 70.0)
+          # 4h not extended
+          long_entry_logic.append(df["ROC_9_4h"] < 25.0)
+          # not in macro bear on 1d
+          long_entry_logic.append(df["ROC_9_1d"] > -30.0)
+
+          # Logic
+          # 1h OBV rising: institutional volume accumulation (Zarattini et al., SSRN/SFI 2025)
+          long_entry_logic.append(df["OBV_change_pct_1h"] > 0.0)
+          # 4h OBV also rising: trend onset confirmed across timeframes
+          long_entry_logic.append(df["OBV_change_pct_4h"] > 0.0)
+          # 1h money flow positive: buyers in control
+          long_entry_logic.append(df["CMF_20_1h"] > 0.0)
+          # 4h RSI building momentum: trend not yet mature
+          long_entry_logic.append(df["RSI_14_diff_4h"] > 0.0)
+          # price above 1h short MA: trend onset structure
+          long_entry_logic.append(df["close"] > df["EMA_12_1h"])
+          # 5m entry not chasing
+          long_entry_logic.append(df["RSI_3"] < 55.0)
+
+        # Condition #166 - Oversold bounce: 5m WILLR + MFI extreme + 1h BB expanded (Long).
+        if long_entry_condition_index == 166:
+          # Protections
+          long_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          long_entry_logic.append(df["protections_long_global"] == True)
+          # 5m & 4h down move, 4h still not low enough
+          long_entry_logic.append((df["RSI_3"] > 5.0) | (df["RSI_3_4h"] > 15.0) | (df["STOCHRSIk_14_14_3_3_4h"] < 20.0))
+          # 5m & 1h down move, 1h still high
+          long_entry_logic.append((df["RSI_3"] > 5.0) | (df["RSI_3_1h"] > 20.0) | (df["AROONU_14_1h"] < 50.0))
+          # not crashed beyond recovery: was at least 8% higher in last 4h
+          long_entry_logic.append(df["close_max_48"] >= (df["close"] * 1.08))
+          # 1h not in strong downtrend
+          long_entry_logic.append((df["ROC_9_1h"] > -25.0) | (df["RSI_3_1h"] > 10.0))
+          # 4h not in macro crash
+          long_entry_logic.append((df["ROC_9_4h"] > -25.0) | (df["RSI_14_4h"] > 20.0))
+          # 4h RSI_3 not in freefall
+          long_entry_logic.append(df["RSI_3_4h"] > 10.0)
+
+          # Logic
+          # multi-indicator mean-reversion: WILLR + MFI extreme oversold on 5m (Lo & MacKinlay 1990, Jegadeesh 1990)
+          long_entry_logic.append(
+            (df["RSI_3"] < 10.0)
+            & (df["WILLR_14"] < -92.0)
+            & (df["MFI_14"] < 15.0)
+            & (df["RSI_3_1h"] < 20.0)
+            & (df["STOCHRSIk_14_14_3_3_1h"] < 10.0)
+            & (df["BBB_20_2.0_1h"] > 20.0)
+          )
+
+        # Condition #167 - Oversold bounce: RSI_20 declining + 5m extreme + 1h confirmation (Long).
+        if long_entry_condition_index == 167:
+          # Protections
+          long_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          long_entry_logic.append(df["protections_long_global"] == True)
+          # 5m & 4h down move, 4h still not low enough
+          long_entry_logic.append((df["RSI_3"] > 3.0) | (df["RSI_3_4h"] > 10.0) | (df["AROONU_14_4h"] < 20.0))
+          # 15m & 1h down move, 1h still not low enough
+          long_entry_logic.append((df["RSI_3_15m"] > 3.0) | (df["RSI_3_1h"] > 10.0) | (df["AROONU_14_1h"] < 25.0))
+          # 4h not in strong macro downtrend
+          long_entry_logic.append((df["ROC_9_4h"] > -30.0) | (df["CMF_20_4h"] > -0.30))
+
+          # Logic
+          # RSI_3 turning up from extreme low = bounce started, snap-back imminent (same pattern as signal 141)
+          long_entry_logic.append(
+            (df["RSI_3"] > df["RSI_3"].shift(1))
+            & (df["RSI_3"] < 20.0)
+            & (df["AROONU_14"] < 20.0)
+            & (df["close"] < (df["SMA_16"] * 0.960))
+            & (df["RSI_3_1h"] < 15.0)
+            & (df["STOCHRSIk_14_14_3_3_1h"] < 10.0)
+          )
+
+        # Condition #168 - Donchian 20-day breakout on 4h: structural uptrend onset (Long).
+        if long_entry_condition_index == 168:
+          # Protections
+          long_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          long_entry_logic.append(df["protections_long_global"] == True)
+          # not deeply overbought after breakout
+          long_entry_logic.append(df["RSI_14_4h"] < 80.0)
+          long_entry_logic.append(df["RSI_14_1h"] < 80.0)
+          # volume not negative (breakout must have flow support)
+          long_entry_logic.append(df["CMF_20_4h"] > -0.10)
+
+          # Logic
+          # New 20-day high on 4h = structural breakout: by definition cannot fire in downtrend
+          # (Zarattini, Pagani, Barbon — SSRN 2025: Donchian channel for crypto trend onset)
+          # Entry within 5% of breakout level to avoid chasing
+          long_entry_logic.append(
+            (df["close"] > df["high_max_120_4h"])
+            & (df["close"] < (df["high_max_120_4h"] * 1.05))
+            & (df["CMF_20_4h"] > 0.0)
+            & (df["RSI_3"] > 20.0)
+            & (df["RSI_3"] < 75.0)
+          )
+
+        # Condition #169 - Uptrend continuation: 4h ROC + OBV + 1h RSI > 50 + dip entry (Long).
+        if long_entry_condition_index == 169:
+          # Protections
+          long_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          long_entry_logic.append(df["protections_long_global"] == True)
+          # 4h not extended
+          long_entry_logic.append(df["RSI_14_4h"] < 65.0)
+          # 4h not overbought (CCI)
+          long_entry_logic.append(df["CCI_20_4h"] < 150.0)
+          # 1h not overbought
+          long_entry_logic.append(df["RSI_14_1h"] < 65.0)
+
+          # Logic
+          # Multi-timeframe price+volume+RSI convergence (Fieberg CTREND JFQA 2025)
+          # CTREND aggregates signals across horizons: 4h trend + 4h volume + 1h confirmation
+          long_entry_logic.append(
+            (df["ROC_9_4h"] > 3.0)
+            & (df["RSI_14_diff_4h"] > 0.0)
+            & (df["OBV_change_pct_4h"] > 0.0)
+            & (df["CMF_20_1h"] > 0.05)
+            & (df["RSI_14_1h"] > 50.0)
+            & (df["RSI_3"] < 55.0)
+          )
+
+        # Condition #170 - OBV Accumulation Pre-Pump (Long).
+        # Rationale: Karbalaii 2025 (arXiv:2504.15790) shows 69.3% of pumps have a
+        # detectable accumulation phase where OBV rises while price stays flat.
+        # Amirzadeh 2023 (arXiv:2306.08157) confirms OBV as causally upstream variable.
+        # Enter during accumulation before the breakout.
+        if long_entry_condition_index == 170:
+          # Protections
+          long_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          long_entry_logic.append(df["protections_long_global"] == True)
+          # 4h still neutral-bearish — not already in rally
+          long_entry_logic.append(df["RSI_14_4h"] < 50.0)
+          # 1h not overbought
+          long_entry_logic.append(df["RSI_14_1h"] < 58.0)
+          # 4h money flow not deeply negative
+          long_entry_logic.append(df["CMF_20_4h"] > -0.15)
+
+          # Logic
+          long_entry_logic.append(
+            # OBV rising significantly on 1h — strong accumulation signal
+            (df["OBV_change_pct_1h"] > 2.0)
+            # money flow building, but not yet pumped
+            & (df["CMF_20_1h"] > -0.05)
+            & (df["CMF_20_1h"] < 0.25)
+            # early momentum zone on 1h (35-55)
+            & (df["RSI_14_1h"] > 35.0)
+            # volume spike more pronounced: 12h avg > 130% of 24h baseline
+            & (df["volume_mean_12_1h"] > df["volume_mean_24_1h"] * 1.3)
+            # 5m dip entry — not chasing
+            & (df["RSI_3"] < 40.0)
+          )
+
+        # Condition #171 - Bollinger Band Squeeze Breakout (Long).
+        # Rationale: Karbalaii 2025 (arXiv:2504.15790) identifies price range compression
+        # as the fingerprint of pre-accumulated pumps. El Youssefi 2025 (CMC Journal)
+        # confirms Bollinger Bands as top surviving indicator in feature selection.
+        # BB bandwidth below recent average = coiled spring before explosion.
+        if long_entry_condition_index == 171:
+          # Protections
+          long_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          long_entry_logic.append(df["protections_long_global"] == True)
+          # 4h not extended — not already in rally
+          long_entry_logic.append(df["RSI_14_4h"] < 55.0)
+          # 4h money flow must also confirm
+          long_entry_logic.append(df["CMF_20_4h"] > 0.05)
+          # 1h not overbought
+          long_entry_logic.append(df["RSI_14_1h"] < 58.0)
+
+          # Logic
+          long_entry_logic.append(
+            # BB bandwidth below its 20-period mean = squeeze (range compression)
+            (df["BBB_20_2.0_1h"] < df["BBB_20_2.0_mean_20_1h"])
+            # OBV confirming accumulation during the squeeze
+            & (df["OBV_change_pct_1h"] > 0.0)
+            # positive money flow — buying is absorbing supply
+            & (df["CMF_20_1h"] > 0.0)
+            # early momentum zone — not overbought
+            & (df["RSI_14_1h"] > 35.0)
+            # stocastico in zona oversold durante la squeeze — entry selettivo
+            & (df["STOCHRSIk_14_14_3_3_1h"] < 30.0)
+            # 5m pullback
+            & (df["RSI_3"] < 40.0)
+          )
+
+        # Condition #172 - Volume Surge + CMF Confirmation (Long).
+        # Rationale: Bolz et al. 2024 (arXiv:2412.18848) found volume Z-score the best
+        # pre-pump signal. Karbalaii 2025 (arXiv:2503.08692) found optimal threshold:
+        # volume > 400% of EWMA baseline. When surge is confirmed by positive CMF,
+        # it is genuine buying pressure not manipulation noise.
+        if long_entry_condition_index == 172:
+          # Protections
+          long_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          long_entry_logic.append(df["protections_long_global"] == True)
+          # not already extended
+          long_entry_logic.append(df["RSI_14_4h"] < 65.0)
+          long_entry_logic.append(df["RSI_14_1h"] < 62.0)
+          # 4h money flow must confirm the surge is genuine buying
+          long_entry_logic.append(df["CMF_20_4h"] > 0.0)
+
+          # Logic
+          long_entry_logic.append(
+            # current 1h volume > 3x 24h baseline — significant surge (Bolz: 4x threshold)
+            (df["volume_ratio_24_1h"] > 3.0)
+            # CMF confirms buying (not just volatility / short covering)
+            & (df["CMF_20_1h"] > 0.05)
+            # OBV rising — volume is accumulation, not distribution
+            & (df["OBV_change_pct_1h"] > 0.0)
+            # early momentum — not already overbought on 1h
+            & (df["RSI_14_1h"] > 40.0)
+            # 5m not chasing the surge
+            & (df["RSI_3"] < 50.0)
+            & (df["RSI_14_1h"] < 58.0)
+          )
+
         ###############################################################################################
 
         # LONG ENTRY CONDITIONS ENDS HERE
@@ -26238,6 +26730,292 @@ class NostalgiaForInfinityX7(IStrategy):
           else:
             short_entry_logic.append(pd.Series([False]))
           short_entry_logic.append(bbb_20_2_0_1h > 4.0)
+
+        # Condition #662 - Dead cat bounce (Short).
+        if short_entry_condition_index == 662:
+          # Protections
+          short_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          short_entry_logic.append(df["protections_short_global"] == True)
+          short_entry_logic.append(df["global_protections_short_pump"] == True)
+          short_entry_logic.append(df["global_protections_short_dump"] == True)
+
+          short_entry_logic.append(df["RSI_3_1h"] >= 5.0)
+          short_entry_logic.append(df["RSI_3_4h"] >= 15.0)
+          short_entry_logic.append(df["RSI_14_1h"] > 20.0)
+          short_entry_logic.append(df["RSI_14_4h"] > 20.0)
+          # 1h bounce, 4h still not high enough
+          short_entry_logic.append((df["RSI_3_1h"] < 95.0) | (df["STOCHRSIk_14_14_3_3_4h"] > 50.0))
+          # 1h bounce, 4h still bearish
+          short_entry_logic.append((df["RSI_3_1h"] < 90.0) | (df["RSI_3_4h"] < 80.0))
+          # 1h overbought, 1d still low
+          short_entry_logic.append((df["RSI_14_1h"] < 80.0) | (df["RSI_14_1d"] > 30.0))
+          # 5m spike, 1h not in extreme zone
+          short_entry_logic.append((df["RSI_3"] < 90.0) | (df["RSI_3_1h"] < 85.0))
+          # anti-pump: price rose more than 30% in last 12 1h candles vs prior 12 → genuine reversal not fresh launch
+          short_entry_logic.append(
+            (df["close"] < (df["low_min_12_1h"] * 1.30)) | (df["low_min_12_1h"] > (df["low_min_24_1h"] * 1.10))
+          )
+          # big pump in last 30 days + 4h still flying — avoid shorting explosive moves
+          short_entry_logic.append((df["close"] < (df["low_min_30_1d"] * 4.0)) | (df["RSI_3_4h"] < 85.0))
+
+          # Logic
+          # Macro bear: price below EMA_200 on 1h and 4h
+          if isinstance(df["EMA_200_1h"].iloc[-1], np.float64):
+            short_entry_logic.append(df["close"] < df["EMA_200_1h"])
+          else:
+            short_entry_logic.append(pd.Series([False]))
+          if isinstance(df["EMA_200_4h"].iloc[-1], np.float64):
+            short_entry_logic.append(df["close"] < df["EMA_200_4h"])
+          else:
+            short_entry_logic.append(pd.Series([False]))
+          # 1h bounced above neutral — dead cat visible on 1h
+          short_entry_logic.append(df["RSI_14_1h"] > 58.0)
+          # No real accumulation — bounce is clearly negative
+          short_entry_logic.append(df["CMF_20_1h"] < -0.05)
+          # 1h short-term momentum spiked up significantly
+          short_entry_logic.append(df["RSI_3_1h"] > 70.0)
+          # 4h not fully recovered — macro still depressed
+          short_entry_logic.append(df["STOCHRSIk_14_14_3_3_4h"] < 60.0)
+          # price bounced at least 5% from recent 48-candle low — confirms bounce
+          short_entry_logic.append(df["close_min_48"] <= (df["close"] * 0.95))
+
+        # Condition #663 - OBV bearish divergence (Short).
+        # Rationale: Mann 2025 (SSRN 5225612) confirms OBV and CMF as statistically
+        # significant factors in crypto. When price bounces on 1h but OBV declines,
+        # the move is not backed by real volume — classic bearish divergence.
+        if short_entry_condition_index == 663:
+          # Protections
+          short_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          short_entry_logic.append(df["protections_short_global"] == True)
+          short_entry_logic.append(df["global_protections_short_pump"] == True)
+          short_entry_logic.append(df["global_protections_short_dump"] == True)
+
+          short_entry_logic.append(df["RSI_3_1h"] >= 5.0)
+          short_entry_logic.append(df["RSI_3_4h"] >= 15.0)
+          short_entry_logic.append(df["RSI_14_1h"] > 20.0)
+          short_entry_logic.append(df["RSI_14_4h"] > 20.0)
+          # 1h bounce, 4h still bearish
+          short_entry_logic.append((df["RSI_3_1h"] < 90.0) | (df["RSI_3_4h"] < 80.0))
+          # 1h overbought, 1d still low
+          short_entry_logic.append((df["RSI_14_1h"] < 80.0) | (df["RSI_14_1d"] > 30.0))
+          # anti-pump: no explosive move in last 12 1h candles
+          short_entry_logic.append(
+            (df["close"] < (df["low_min_12_1h"] * 1.30)) | (df["low_min_12_1h"] > (df["low_min_24_1h"] * 1.10))
+          )
+          # big pump in last 30 days + 4h still flying
+          short_entry_logic.append((df["close"] < (df["low_min_30_1d"] * 4.0)) | (df["RSI_3_4h"] < 85.0))
+
+          # Logic
+          # Macro bear: price below EMA_200 on 1h and 4h
+          if isinstance(df["EMA_200_1h"].iloc[-1], np.float64):
+            short_entry_logic.append(df["close"] < df["EMA_200_1h"])
+          else:
+            short_entry_logic.append(pd.Series([False]))
+          if isinstance(df["EMA_200_4h"].iloc[-1], np.float64):
+            short_entry_logic.append(df["close"] < df["EMA_200_4h"])
+          else:
+            short_entry_logic.append(pd.Series([False]))
+          # 1h price spike — visible bounce
+          short_entry_logic.append(df["RSI_3_1h"] > 65.0)
+          # OBV not confirming — volume declining on bounce (bearish divergence)
+          short_entry_logic.append(df["OBV_change_pct_1h"] < 0.0)
+          # Clearly negative money flow on 1h and 4h — not just noise
+          short_entry_logic.append(df["CMF_20_1h"] < -0.05)
+          short_entry_logic.append(df["CMF_20_4h"] < 0.0)
+          # 4h momentum also bearish — not just 1h
+          short_entry_logic.append(df["RSI_14_4h"] < 50.0)
+          # 4h still structurally depressed
+          short_entry_logic.append(df["STOCHRSIk_14_14_3_3_4h"] < 45.0)
+          # price bounced at least 5% from 48-candle low
+          short_entry_logic.append(df["close_min_48"] <= (df["close"] * 0.95))
+
+        # Condition #664 - BB expansion bearish (Short).
+        # Rationale: Zarattini 2025 (SSRN 5209907) and volatility literature show that
+        # when Bollinger Band width expands while price is below the middle band and
+        # EMA_200, volatility is expanding in the bearish direction — downtrend continuation.
+        if short_entry_condition_index == 664:
+          # Protections
+          short_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          short_entry_logic.append(df["protections_short_global"] == True)
+          short_entry_logic.append(df["global_protections_short_pump"] == True)
+          short_entry_logic.append(df["global_protections_short_dump"] == True)
+
+          short_entry_logic.append(df["RSI_3_1h"] >= 5.0)
+          short_entry_logic.append(df["RSI_3_4h"] >= 15.0)
+          short_entry_logic.append(df["RSI_14_1h"] > 20.0)
+          short_entry_logic.append(df["RSI_14_4h"] > 20.0)
+          # 1h bounce, 4h still bearish
+          short_entry_logic.append((df["RSI_3_1h"] < 90.0) | (df["RSI_3_4h"] < 80.0))
+          # 1h overbought, 1d still low
+          short_entry_logic.append((df["RSI_14_1h"] < 80.0) | (df["RSI_14_1d"] > 30.0))
+          # anti-pump
+          short_entry_logic.append(
+            (df["close"] < (df["low_min_12_1h"] * 1.30)) | (df["low_min_12_1h"] > (df["low_min_24_1h"] * 1.10))
+          )
+          short_entry_logic.append((df["close"] < (df["low_min_30_1d"] * 4.0)) | (df["RSI_3_4h"] < 85.0))
+
+          # Logic
+          # Macro bear: price below EMA_200 on 1h and 4h
+          if isinstance(df["EMA_200_1h"].iloc[-1], np.float64):
+            short_entry_logic.append(df["close"] < df["EMA_200_1h"])
+          else:
+            short_entry_logic.append(pd.Series([False]))
+          if isinstance(df["EMA_200_4h"].iloc[-1], np.float64):
+            short_entry_logic.append(df["close"] < df["EMA_200_4h"])
+          else:
+            short_entry_logic.append(pd.Series([False]))
+          # BB is wide — volatility has expanded (bear expansion, not squeeze)
+          short_entry_logic.append(df["BBB_20_2.0_1h"] > 15.0)
+          # Price below middle band — expansion is in bearish direction
+          short_entry_logic.append(df["close"] < df["BBM_20_2.0_1h"])
+          # 1h momentum bearish
+          short_entry_logic.append(df["RSI_14_1h"] < 52.0)
+          # Strong negative money flow
+          short_entry_logic.append(df["CMF_20_1h"] < -0.05)
+          # Local bounce entry point on 5m
+          short_entry_logic.append(df["RSI_3"] > 50.0)
+          short_entry_logic.append(df["RSI_3"] < 85.0)
+
+        # Condition #665 - Short at resistance in structural downtrend (Short).
+        # Rationale: Williams %R near 0 on 1h (WILLR_84_1h > -30) identifies price
+        # near the top of its recent range — classic resistance zone short setup.
+        # AROOND_14_4h > 60 confirms persistent 4h downtrend (Aroon Down > 60 means
+        # new lows are consistently being set, per Tushar Chande 1995).
+        # CMF_20_1h < -0.05 and OBV divergence from Mann 2025 (SSRN 5225612) confirm
+        # absence of accumulation behind the bounce.
+        if short_entry_condition_index == 665:
+          # Protections
+          short_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          short_entry_logic.append(df["protections_short_global"] == True)
+          short_entry_logic.append(df["global_protections_short_pump"] == True)
+          short_entry_logic.append(df["global_protections_short_dump"] == True)
+
+          short_entry_logic.append(df["RSI_3_1h"] >= 5.0)
+          short_entry_logic.append(df["RSI_3_4h"] >= 15.0)
+          short_entry_logic.append(df["RSI_14_1h"] > 20.0)
+          short_entry_logic.append(df["RSI_14_4h"] > 20.0)
+          # 1h bounce, 4h still bearish
+          short_entry_logic.append((df["RSI_3_1h"] < 90.0) | (df["RSI_3_4h"] < 80.0))
+          # 1h overbought, 1d still low
+          short_entry_logic.append((df["RSI_14_1h"] < 80.0) | (df["RSI_14_1d"] > 30.0))
+          # anti-pump: no explosive launch in last 12 1h candles
+          short_entry_logic.append(
+            (df["close"] < (df["low_min_12_1h"] * 1.30)) | (df["low_min_12_1h"] > (df["low_min_24_1h"] * 1.10))
+          )
+          # big pump in last 30 days + 4h still flying
+          short_entry_logic.append((df["close"] < (df["low_min_30_1d"] * 4.0)) | (df["RSI_3_4h"] < 85.0))
+
+          # Logic
+          # Macro bear: price below EMA_200 on 4h
+          if isinstance(df["EMA_200_4h"].iloc[-1], np.float64):
+            short_entry_logic.append(df["close"] < df["EMA_200_4h"])
+          else:
+            short_entry_logic.append(pd.Series([False]))
+          # 4h structural downtrend: Aroon Down > 60 (consistently making new lows)
+          short_entry_logic.append(df["AROOND_14_4h"] > 60.0)
+          # 1h price near top of 84-candle range — at resistance (Williams %R)
+          short_entry_logic.append(df["WILLR_84_1h"] > -30.0)
+          # No real accumulation on 1h — bounce is fake
+          short_entry_logic.append(df["CMF_20_1h"] < -0.05)
+          # OBV not confirming the 1h bounce
+          short_entry_logic.append(df["OBV_change_pct_1h"] < 0.0)
+          # 4h still structurally depressed
+          short_entry_logic.append(df["STOCHRSIk_14_14_3_3_4h"] < 55.0)
+          # price bounced at least 5% from 48-candle low
+          short_entry_logic.append(df["close_min_48"] <= (df["close"] * 0.95))
+
+        # Condition #666 - CCI overbought cycle peak reversal (Short).
+        # Rationale: CCI (Lambert 1980) identifies cyclical turns. When CCI_20_1h > 100
+        # (price strongly above its 20-period mean = overbought) and CCI is turning
+        # down (change_pct < 0), the cycle has peaked. In a macro bear (EMA_200_4h),
+        # this peak is a dead cat bounce top. Double-confirmed with CMF_20_1h < -0.05
+        # (Mann 2025, SSRN 5225612) to avoid entering on genuine accumulation.
+        if short_entry_condition_index == 666:
+          # Protections
+          short_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          short_entry_logic.append(df["protections_short_global"] == True)
+          short_entry_logic.append(df["global_protections_short_pump"] == True)
+          short_entry_logic.append(df["global_protections_short_dump"] == True)
+
+          short_entry_logic.append(df["RSI_3_1h"] >= 5.0)
+          short_entry_logic.append(df["RSI_3_4h"] >= 15.0)
+          short_entry_logic.append(df["RSI_14_1h"] > 20.0)
+          short_entry_logic.append(df["RSI_14_4h"] > 20.0)
+          # 1h bounce, 4h still bearish
+          short_entry_logic.append((df["RSI_3_1h"] < 90.0) | (df["RSI_3_4h"] < 80.0))
+          # 1h overbought, 1d still low
+          short_entry_logic.append((df["RSI_14_1h"] < 80.0) | (df["RSI_14_1d"] > 30.0))
+          # anti-pump: no explosive launch in last 12 1h candles
+          short_entry_logic.append(
+            (df["close"] < (df["low_min_12_1h"] * 1.30)) | (df["low_min_12_1h"] > (df["low_min_24_1h"] * 1.10))
+          )
+          # big pump in last 30 days + 4h still flying
+          short_entry_logic.append((df["close"] < (df["low_min_30_1d"] * 4.0)) | (df["RSI_3_4h"] < 85.0))
+
+          # Logic
+          # Macro bear: price below EMA_200 on 4h
+          if isinstance(df["EMA_200_4h"].iloc[-1], np.float64):
+            short_entry_logic.append(df["close"] < df["EMA_200_4h"])
+          else:
+            short_entry_logic.append(pd.Series([False]))
+          # CCI overbought: price far above 20-period mean on 1h
+          short_entry_logic.append(df["CCI_20_1h"] > 100.0)
+          # CCI cycle turning down — peak has passed
+          short_entry_logic.append(df["CCI_20_change_pct_1h"] < 0.0)
+          # No real accumulation — bounce is fake
+          short_entry_logic.append(df["CMF_20_1h"] < -0.05)
+          # 4h in structural downtrend
+          short_entry_logic.append(df["AROOND_14_4h"] > 50.0)
+          # 4h still depressed
+          short_entry_logic.append(df["STOCHRSIk_14_14_3_3_4h"] < 55.0)
+          # price bounced at least 5% from 48-candle low
+          short_entry_logic.append(df["close_min_48"] <= (df["close"] * 0.95))
+
+        # Condition #667 - 4h CCI turning down + 1h WILLR overbought (Short).
+        # Rationale: When CCI_20_4h is positive but declining (change_pct < 0),
+        # the 4h cycle has passed its peak — a stronger signal than 1h alone.
+        # WILLR_14_1h > -20 (short-period sensitivity) confirms price is at the very
+        # top of the recent 14-candle range on 1h = optimal short entry timing.
+        # Based on multi-timeframe alignment principle from Lambert (1980) and
+        # confirmed by Mann 2025 (SSRN 5225612) multi-factor significance.
+        if short_entry_condition_index == 667:
+          # Protections
+          short_entry_logic.append(df["num_empty_288"] <= allowed_empty_candles_288)
+          short_entry_logic.append(df["protections_short_global"] == True)
+          short_entry_logic.append(df["global_protections_short_pump"] == True)
+          short_entry_logic.append(df["global_protections_short_dump"] == True)
+
+          short_entry_logic.append(df["RSI_3_1h"] >= 5.0)
+          short_entry_logic.append(df["RSI_3_4h"] >= 15.0)
+          short_entry_logic.append(df["RSI_14_1h"] > 20.0)
+          short_entry_logic.append(df["RSI_14_4h"] > 20.0)
+          # 1h bounce, 4h still bearish
+          short_entry_logic.append((df["RSI_3_1h"] < 90.0) | (df["RSI_3_4h"] < 80.0))
+          # 1h overbought, 1d still low
+          short_entry_logic.append((df["RSI_14_1h"] < 80.0) | (df["RSI_14_1d"] > 30.0))
+          # anti-pump
+          short_entry_logic.append(
+            (df["close"] < (df["low_min_12_1h"] * 1.30)) | (df["low_min_12_1h"] > (df["low_min_24_1h"] * 1.10))
+          )
+          short_entry_logic.append((df["close"] < (df["low_min_30_1d"] * 4.0)) | (df["RSI_3_4h"] < 85.0))
+
+          # Logic
+          # Macro bear: price below EMA_200 on 4h
+          if isinstance(df["EMA_200_4h"].iloc[-1], np.float64):
+            short_entry_logic.append(df["close"] < df["EMA_200_4h"])
+          else:
+            short_entry_logic.append(pd.Series([False]))
+          # 4h CCI positive but turning down — 4h cycle peaked
+          short_entry_logic.append(df["CCI_20_4h"] > 0.0)
+          short_entry_logic.append(df["CCI_20_change_pct_4h"] < 0.0)
+          # 1h price at top of short-term range — precise entry (WILLR_14)
+          short_entry_logic.append(df["WILLR_14_1h"] > -20.0)
+          # No real accumulation on 1h
+          short_entry_logic.append(df["CMF_20_1h"] < -0.05)
+          # 4h structurally depressed
+          short_entry_logic.append(df["STOCHRSIk_14_14_3_3_4h"] < 55.0)
+          # price bounced at least 5% from 48-candle low
+          short_entry_logic.append(df["close_min_48"] <= (df["close"] * 0.95))
 
         ###############################################################################################
 
